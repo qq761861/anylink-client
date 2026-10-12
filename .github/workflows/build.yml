@@ -59,25 +59,11 @@ jobs:
           node-version: '18'
           cache: 'yarn'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install 7-Zip (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
-            choco install 7zip -y --no-progress
-            $env:PATH = "C:\Program Files\7-Zip;$env:PATH"
-          }
-
       - name: Install dependencies
         run: yarn install --frozen-lockfile --network-timeout 1000000
 
       - name: Download vpn agent binary
-        run: python scripts/download-agent.py ${{ matrix.platform }} ${{ matrix.arch }}
+        run: node scripts/download-agent.js ${{ matrix.platform }} ${{ matrix.arch }}
 
       - name: Build with electron-builder
         shell: bash
@@ -87,7 +73,7 @@ jobs:
           ARCH="${{ matrix.arch }}"
           PLATFORM="${{ matrix.platform }}"
 
-          # 映射 electron-builder 参数
+          # map electron-builder args
           case "$ARCH" in
             amd64) B_FLAG="--x64" ;;
             386)   B_FLAG="--ia32" ;;
