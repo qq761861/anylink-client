@@ -20,7 +20,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const https = require("https");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 
 const REPO = process.env.AGENT_RELEASE_REPO || "jarryxy/anylink-client";
 const TAG = process.env.AGENT_RELEASE_TAG || "v1.0.1";
@@ -64,10 +64,9 @@ function download(url, dest) {
   });
 }
 
-function resolve7za() {
-  // Prefer the 7za binary bundled with electron-builder (7zip-bin), which is
-  // guaranteed to exist after `yarn install` and behaves identically on CI
-  // and locally. Fall back to a system-installed 7z/7za/7zr.
+function resolve7zaCandidates() {
+  // Return a list of 7za candidates, ordered by preference. The extraction
+  // logic will try each one until success, so a broken binary can fall back.
   const candidates = [];
   try {
     const sevenZipBin = require("7zip-bin");
@@ -77,22 +76,25 @@ function resolve7za() {
   } catch (e) {
     // 7zip-bin not available; fall back to PATH lookup below.
   }
-  candidates.push("7z", "7za", "7zr");
-
-  for (const c of candidates) {
-    if (fs.existsSync(c)) {
-      return c;
-    }
-  }
-  // Try PATH lookup for the bare command names.
-  const { spawnSync } = require("child_process");
+  // System-installed 7z / 7za / 7zr via PATH.
   for (const c of ["7z", "7za", "7zr"]) {
     const r = spawnSync("where", [c], { encoding: "utf8" });
     if (r.status === 0 && r.stdout.trim()) {
-      return r.stdout.trim().split(/\r?\n/)[0];
+      const p = r.stdout.trim().split(/\r?\n/)[0];
+      if (!candidates.includes(p)) candidates.push(p);
     }
   }
-  throw new Error("7-Zip not found; cannot extract NSIS installer");
+  // Common absolute install paths on Windows.
+  for (const p of [
+    "C:\\Program Files\\7-Zip\\7z.exe",
+    "C:\\Program Files (x86)\\7-Zip\\7z.exe",
+  ]) {
+    if (fs.existsSync(p) && !candidates.includes(p)) candidates.push(p);
+  }
+  if (candidates.length === 0) {
+    throw new Error("7-Zip not found; cannot extract NSIS installer");
+  }
+  return candidates;
 }
 
 function findAgent(root) {
@@ -117,16 +119,44 @@ function findAgent(root) {
   return null;
 }
 
-function extractWindowsNsis(asset, destDir, agentName, sevenZip) {
+function tryExtract(sevenZip, asset, tmp) {
+  const result = spawnSync(sevenZip, ["x", "-y", `-o${tmp}`, asset], {
+    encoding: "utf8",
+  });
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
+  if (result.error) {
+    return { ok: false, err: result.error.message, stdout, stderr };
+  }
+  if (result.status !== 0) {
+    return { ok: false, err: `exit code ${result.status}`, stdout, stderr };
+  }
+  return { ok: true, stdout, stderr };
+}
+
+function extractWindowsNsis(asset, destDir, agentName, sevenZipCandidates) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-"));
   try {
-    log(`Extracting NSIS installer with ${sevenZip}`);
-    try {
-      execFileSync(sevenZip, ["x", "-y", `-o${tmp}`, asset], {
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-    } catch (e) {
-      throw new Error(`7-Zip extraction failed: ${e.message}`);
+    let extracted = false;
+    const errors = [];
+    for (const sevenZip of sevenZipCandidates) {
+      log(`Extracting NSIS installer with ${sevenZip}`);
+      const r = tryExtract(sevenZip, asset, tmp);
+      if (r.ok) {
+        extracted = true;
+        break;
+      }
+      errors.push(`[${sevenZip}] ${r.err}`);
+      log(`  failed: ${r.err}`);
+      if (r.stdout) log(`  stdout: ${r.stdout.slice(0, 500)}`);
+      if (r.stderr) log(`  stderr: ${r.stderr.slice(0, 500)}`);
+      // 清理部分解压的结果，供下一个候选重试
+      for (const e of fs.readdirSync(tmp)) {
+        fs.rmSync(path.join(tmp, e), { recursive: true, force: true });
+      }
+    }
+    if (!extracted) {
+      throw new Error("all 7-Zip candidates failed:\n" + errors.join("\n"));
     }
     const agent = findAgent(tmp);
     if (!agent) {
@@ -231,8 +261,8 @@ async function main() {
   try {
     await download(url, assetPath);
     if (platform === "win") {
-      const sevenZip = resolve7za();
-      extractWindowsNsis(assetPath, destDir, agentName, sevenZip);
+      const sevenZipCandidates = resolve7zaCandidates();
+      extractWindowsNsis(assetPath, destDir, agentName, sevenZipCandidates);
     } else if (platform === "mac") {
       extractMacDmg(assetPath, destDir, agentName);
     } else if (platform === "linux") {
