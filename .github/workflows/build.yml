@@ -1,0 +1,116 @@
+name: Build
+
+on:
+  push:
+    branches: [ master, main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows
+          - os: windows-latest
+            platform: win
+            arch: amd64
+          - os: windows-latest
+            platform: win
+            arch: 386
+          - os: windows-latest
+            platform: win
+            arch: arm64
+          # macOS
+          - os: macos-latest
+            platform: mac
+            arch: amd64
+          - os: macos-latest
+            platform: mac
+            arch: arm64
+          # Linux
+          - os: ubuntu-latest
+            platform: linux
+            arch: amd64
+          - os: ubuntu-latest
+            platform: linux
+            arch: arm
+          - os: ubuntu-latest
+            platform: linux
+            arch: arm64
+
+    env:
+      AGENT_RELEASE_TAG: v1.0.1
+      AGENT_RELEASE_REPO: jarryxy/anylink-client
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install 7-Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            choco install 7zip -y --no-progress
+            $env:PATH = "C:\Program Files\7-Zip;$env:PATH"
+          }
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile --network-timeout 1000000
+
+      - name: Download vpn agent binary
+        run: python scripts/download-agent.py ${{ matrix.platform }} ${{ matrix.arch }}
+
+      - name: Build with electron-builder
+        shell: bash
+        env:
+          AGENT_ARCH: ${{ matrix.arch }}
+        run: |
+          ARCH="${{ matrix.arch }}"
+          PLATFORM="${{ matrix.platform }}"
+
+          # 映射 electron-builder 参数
+          case "$ARCH" in
+            amd64) B_FLAG="--x64" ;;
+            386)   B_FLAG="--ia32" ;;
+            arm64) B_FLAG="--arm64" ;;
+            arm)   B_FLAG="--armv7l" ;;
+          esac
+
+          case "$PLATFORM" in
+            win)   B_PLATFORM="--win" ;;
+            mac)   B_PLATFORM="--mac" ;;
+            linux) B_PLATFORM="--linux" ;;
+          esac
+
+          npx cross-env BUILD_TARGET=clean node .electron-vue/build.js
+          npx cross-env AGENT_ARCH="$ARCH" electron-builder "$B_PLATFORM" "$B_FLAG"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: anylink-client-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            build/*.exe
+            build/*.dmg
+            build/*.tar.gz
+            build/*.AppImage
+          if-no-files-found: ignore

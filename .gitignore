@@ -6,6 +6,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# vpn agent 二进制（由 scripts/download-agent.py 从上游 release 下载）
+vpnagent/
+
 # Editor directories and files
 .idea
 .vscode

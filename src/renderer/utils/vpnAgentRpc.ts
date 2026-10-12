@@ -27,6 +27,7 @@ export class VpnAgentRpc {
     private errorCallback: (error: string) => void;
     private openCallback: (error: string) => void;
     private closeCallback: (error: string) => void;
+    private reconnectingCallback: (attempt: number) => void;
     constructor() {
         this.websocket = new WebSocketClient()
         this.websocket.setCallbacks({
@@ -41,6 +42,9 @@ export class VpnAgentRpc {
             },
             onClose: (event) => {
                 this.closeCallback && this.closeCallback(JSON.stringify(event))
+            },
+            onReconnecting: (attempt) => {
+                this.reconnectingCallback && this.reconnectingCallback(attempt)
             }
         })
     }
@@ -102,6 +106,10 @@ export class VpnAgentRpc {
 
     onClose(cb: (error: string) => void) {
         this.closeCallback = cb
+    }
+
+    onReconnecting(cb: (attempt: number) => void) {
+        this.reconnectingCallback = cb
     }
 }
 
