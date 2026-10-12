@@ -24,6 +24,13 @@ import tempfile
 import subprocess
 import urllib.request
 
+# Windows 默认控制台编码可能不是 UTF-8（如 cp1252），会导致中文日志输出报错。
+# 强制将标准输出/错误流重配置为 UTF-8，避免 UnicodeEncodeError。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 REPO = os.environ.get("AGENT_RELEASE_REPO", "jarryxy/anylink-client")
 TAG = os.environ.get("AGENT_RELEASE_TAG", "v1.0.1")
 
