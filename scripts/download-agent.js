@@ -222,7 +222,8 @@ async function main() {
 
   const url = `https://github.com/${REPO}/releases/download/${TAG}/${assetName}`;
 
-  const workdir = path.dirname(path.dirname(__dirname));
+  // __dirname is the scripts/ directory; its parent is the project root.
+  const workdir = path.dirname(__dirname);
   const destDir = path.join(workdir, "vpnagent");
   fs.mkdirSync(destDir, { recursive: true });
 
