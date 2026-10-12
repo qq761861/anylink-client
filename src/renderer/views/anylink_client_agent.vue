@@ -215,25 +215,20 @@ onMounted(async () => {
   vpnAgentRpc.onReconnecting(attempt => {
     console.log('rpc reconnecting, attempt:', attempt)
   })
-  // ABORT
+  // ABORT：agent 主动通知 VPN 连接被中止/断开，这是最可靠的断线信号
   vpnAgentRpc.registerCallback(6, (res) => {
     console.log('ABORT', res)
     if (!activeDisconnect) {
-      setTimeout(() => {
-        console.log('ABORT timout')
-        connectVpn(true)
-      }, 1500)
+      handleVpnDropped()
     }
   })
-  // DISCONNECT
+  // DISCONNECT：断开完成（用户主动断开或异常断开都会触发）
   vpnAgentRpc.registerCallback(3, (res) => {
     console.log('DISCONNECT', res)
     disconnecting.value = false
     if (!activeDisconnect) {
-      setTimeout(() => {
-        console.log('DISCONNECT timout')
-        connectVpn(true)
-      }, 1500)
+      // 非主动断开（异常断开），触发自动重连
+      handleVpnDropped()
     }
   })
   vpnAgentRpc.connectToServer('ws://127.0.0.1:7210/rpc')
@@ -312,14 +307,10 @@ function connectVpn(reconnect, otp = '') {
       console.log('ws ' + method + '->:', data)
       if (data.error && Object.keys(data.error).length !== 0) {
         if (reconnect) {
-          // 当快速重连失败，再次尝试完全重新连接，用于服务端可能已经移除session的情况
-          setTimeout(() => {
-            console.log('connectVpn timeout')
-            if (!activeDisconnect) {
-              connectVpn()
-            }
-          }, 3000)
-          // 若已达到重连上限，由 scheduleReconnect 兜底提示
+          // 重连失败：继续由 scheduleReconnect 按退避策略调度下一次重连
+          // （不再用 setTimeout 无限递归，统一走重连调度器）
+          console.log('reconnect failed:', data.error)
+          scheduleReconnect()
         } else {
           Message.error(data.error.message)
         }
@@ -383,21 +374,20 @@ function stopStatusPolling() {
   }
 }
 
-// 系统网络恢复
+// 系统网络恢复：网络恢复后，如果 VPN 之前处于连接状态，立即尝试重连
 function handleNetworkOnline() {
   console.log('系统网络已恢复')
   networkLost = false
-  // 网络恢复后，如果 VPN 之前处于连接状态（或正在重连），则尝试自动重连
   if (wasConnectedBeforeDisconnect && !activeDisconnect && !m_vpnConnected.value) {
     if (!isConnecting.value) {
       console.log('网络恢复，自动重连 VPN')
       resetReconnect()
-      connectVpn(true)
+      scheduleReconnect()
     }
   }
 }
 
-// 系统网络丢失
+// 系统网络丢失：标记网络丢失，暂停重连（等待恢复事件）
 function handleNetworkOffline() {
   console.log('系统网络已断开')
   networkLost = true
@@ -444,6 +434,10 @@ async function getStatVpn() {
       vpnStat.value = data.result
       await sleep(1000);
       getStatVpn()
+    } else if (m_vpnConnected.value && data.error && !activeDisconnect) {
+      // stat 请求返回错误，说明 VPN 连接已断开，触发自动重连
+      console.log('stat 检测到 VPN 断开，触发自动重连')
+      handleVpnDropped()
     }
   })
 }
@@ -489,11 +483,6 @@ function scheduleReconnect() {
   }
   // 用户主动断开则不重连
   if (activeDisconnect) {
-    return
-  }
-  // 系统网络丢失时先暂停重连，等待网络恢复事件
-  if (networkLost) {
-    console.log('系统网络未恢复，暂不重连')
     return
   }
   // 首次重连时记录开始时间
