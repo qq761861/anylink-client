@@ -169,9 +169,11 @@ const logPath = ref('.')
 // 断网重连相关状态
 let reconnectTimer = null
 let reconnectAttempt = 0
-const MAX_RECONNECT_ATTEMPTS = 5
 const RECONNECT_BASE_DELAY = 3000 // ms
 const MAX_RECONNECT_DELAY = 30000 // ms
+// 重连总时长上限：10 分钟内持续尝试重连，超时仍未成功则停止
+const RECONNECT_TIMEOUT = 10 * 60 * 1000 // 10 分钟
+let reconnectStartTime = 0 // 首次开始重连的时间戳
 let wasConnectedBeforeDisconnect = false // 记录断线前是否处于已连接状态
 let statusPollTimer = null
 let networkLost = false // 系统网络是否丢失
@@ -454,9 +456,10 @@ function reconnectVpn() {
 
 // ===== 断网自动重连逻辑 =====
 
-// 重置重连计数
+// 重置重连状态
 function resetReconnect() {
   reconnectAttempt = 0
+  reconnectStartTime = 0
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -479,7 +482,7 @@ function handleVpnDropped() {
   scheduleReconnect()
 }
 
-// 调度自动重连（带次数上限与指数退避）
+// 调度自动重连（10 分钟内持续重连，指数退避）
 function scheduleReconnect() {
   if (reconnectTimer) {
     return
@@ -493,12 +496,16 @@ function scheduleReconnect() {
     console.log('系统网络未恢复，暂不重连')
     return
   }
-  // 达到最大重连次数
-  if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-    console.log('已达到最大重连次数，停止自动重连')
+  // 首次重连时记录开始时间
+  if (reconnectStartTime === 0) {
+    reconnectStartTime = Date.now()
+  }
+  // 超过 10 分钟仍未成功，停止自动重连
+  if (Date.now() - reconnectStartTime >= RECONNECT_TIMEOUT) {
+    console.log('重连已超过 10 分钟，停止自动重连')
     isConnecting.value = false
     isReconnecting.value = false
-    Message.warning('网络连接失败，已停止自动重连，请手动重试')
+    Message.warning('网络连接失败，已持续重连 10 分钟，请检查网络后手动重试')
     return
   }
 
@@ -506,7 +513,8 @@ function scheduleReconnect() {
   reconnectAttempt++
   isConnecting.value = true
   isReconnecting.value = true
-  console.log(`第 ${reconnectAttempt} 次重连，延迟 ${delay}ms`)
+  const elapsed = Math.floor((Date.now() - reconnectStartTime) / 1000)
+  console.log(`第 ${reconnectAttempt} 次重连（已持续 ${elapsed}s），延迟 ${delay}ms`)
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
