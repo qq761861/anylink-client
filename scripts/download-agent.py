@@ -69,8 +69,8 @@ def extract_windows_nsis(asset, dest_dir, agent_name):
 
     with tempfile.TemporaryDirectory() as tmp:
         log(f"Extracting NSIS installer with {seven_zip}")
-        # 先解压整个包，再递归查找 agent 二进制
-        # 注意：保留 7z 输出用于诊断；-o 与输出目录分开传参更稳妥
+        # Extract the whole package first, then locate the agent binary recursively.
+        # Keep 7-Zip output for diagnostics.
         result = subprocess.run(
             [seven_zip, "x", "-y", f"-o{tmp}", asset],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -81,7 +81,7 @@ def extract_windows_nsis(asset, dest_dir, agent_name):
             raise RuntimeError(f"7-Zip extraction failed with code {result.returncode}")
         agent = find_agent(tmp)
         if not agent:
-            # 诊断：列出解压出的 .exe 文件，便于排查
+            # Diagnostic: list extracted .exe files to help troubleshooting.
             log("No agent found. Extracted .exe files:")
             for dirpath, _dirs, files in os.walk(tmp):
                 for name in files:
