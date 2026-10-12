@@ -54,23 +54,39 @@ def extract_windows_nsis(asset, dest_dir, agent_name):
     candidates = [
         "7z",
         "7za",
+        "7zr",
         r"C:\Program Files\7-Zip\7z.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
     ]
     seven_zip = None
     for c in candidates:
-        if shutil.which(c):
-            seven_zip = c
+        p = shutil.which(c)
+        if p:
+            seven_zip = p
             break
     if not seven_zip:
         raise RuntimeError("7-Zip not found; cannot extract NSIS installer")
 
     with tempfile.TemporaryDirectory() as tmp:
         log(f"Extracting NSIS installer with {seven_zip}")
-        subprocess.run([seven_zip, "x", "-y", f"-o{tmp}", asset],
-                       check=True, stdout=subprocess.DEVNULL)
+        # 先解压整个包，再递归查找 agent 二进制
+        # 注意：保留 7z 输出用于诊断；-o 与输出目录分开传参更稳妥
+        result = subprocess.run(
+            [seven_zip, "x", "-y", f"-o{tmp}", asset],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        if result.stdout:
+            log(result.stdout.decode("utf-8", "replace"))
+        if result.returncode != 0:
+            raise RuntimeError(f"7-Zip extraction failed with code {result.returncode}")
         agent = find_agent(tmp)
         if not agent:
+            # 诊断：列出解压出的 .exe 文件，便于排查
+            log("No agent found. Extracted .exe files:")
+            for dirpath, _dirs, files in os.walk(tmp):
+                for name in files:
+                    if name.lower().endswith(".exe"):
+                        log(f"  - {os.path.relpath(os.path.join(dirpath, name), tmp)}")
             raise RuntimeError("anylink_client_agent not found in NSIS package")
         shutil.copy(agent, os.path.join(dest_dir, agent_name))
 
