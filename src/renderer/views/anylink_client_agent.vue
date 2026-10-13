@@ -177,6 +177,11 @@ let reconnectStartTime = 0 // 首次开始重连的时间戳
 let wasConnectedBeforeDisconnect = false // 记录断线前是否处于已连接状态
 let statusPollTimer = null
 let networkLost = false // 系统网络是否丢失
+// 掉线判定防抖：status/stat 轮询需连续失败多次才判定 VPN 真掉线。
+// 避免 agent 瞬时繁忙（如 DTLS 握手 20s 期间响应慢）或单次瞬时错误造成"假掉线"误判，
+// 表现为连接成功后约 30 秒莫名断开又自动连上
+let statusFailCount = 0
+const STATUS_FAIL_THRESHOLD = 3
 // 残留连接清理重试（Windows ERROR_ALREADY_EXISTS：上轮异常退出遗留的虚拟网卡/会话未清理）
 let cleaningUpStale = false // 正在执行"清理残留后重试"流程
 let cleanRetryCount = 0
@@ -359,6 +364,7 @@ function disconnectVpn() {
   activeDisconnect = true
   wasConnectedBeforeDisconnect = false
   isReconnecting.value = false
+  statusFailCount = 0
   // 取消残留清理重试流程
   cleaningUpStale = false
   cleanRetryCount = 0
@@ -382,13 +388,21 @@ function getStatusVpn() {
       vpnStatus.value = data.result ? data.result : {}
     }
     console.log('ws status->:', data)
-    // 检测 VPN 是否已断开：请求返回错误或 result 为空说明连接已失效
+    // 检测 VPN 是否已断开：需连续失败多次（防抖），单次错误/超时不足以判定掉线
     if (m_vpnConnected.value && !activeDisconnect) {
       const hasError = data.error && Object.keys(data.error).length !== 0
       const emptyResult = !data.result || Object.keys(data.result).length === 0
       if (hasError || emptyResult) {
-        console.log('检测到 VPN 连接已断开，准备自动重连', data)
-        handleVpnDropped()
+        statusFailCount++
+        console.log(`status 检查失败（连续第 ${statusFailCount}/${STATUS_FAIL_THRESHOLD} 次）`, data)
+        if (statusFailCount >= STATUS_FAIL_THRESHOLD) {
+          statusFailCount = 0
+          console.log('连续多次失败，判定 VPN 连接已断开，准备自动重连')
+          handleVpnDropped()
+        }
+      } else {
+        // 检查成功，重置失败计数
+        statusFailCount = 0
       }
     }
   })
@@ -477,12 +491,19 @@ async function getStatVpn() {
     console.log('ws stat->:', data)
     if (m_vpnConnected.value && !data.error) {
       vpnStat.value = data.result
+      // stat 正常，重置掉线判定失败计数
+      statusFailCount = 0
       await sleep(1000);
       getStatVpn()
     } else if (m_vpnConnected.value && data.error && !activeDisconnect) {
-      // stat 请求返回错误，说明 VPN 连接已断开，触发自动重连
-      console.log('stat 检测到 VPN 断开，触发自动重连')
-      handleVpnDropped()
+      // stat 请求返回错误：连续失败多次（防抖）才判定 VPN 断开，触发自动重连
+      statusFailCount++
+      console.log(`stat 检查失败（连续第 ${statusFailCount}/${STATUS_FAIL_THRESHOLD} 次）`, data)
+      if (statusFailCount >= STATUS_FAIL_THRESHOLD) {
+        statusFailCount = 0
+        console.log('连续多次失败，判定 VPN 已断开，触发自动重连')
+        handleVpnDropped()
+      }
     }
   })
 }
@@ -623,6 +644,7 @@ function onVpnConnected() {
   resetReconnect()
   cleaningUpStale = false
   cleanRetryCount = 0
+  statusFailCount = 0
   m_vpnConnected.value = true
   wasConnectedBeforeDisconnect = true
   isConnecting.value = false

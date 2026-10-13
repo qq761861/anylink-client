@@ -53,6 +53,13 @@ export class VpnAgentRpc {
     callAsyncParams(method: JsonRpcRequestMethod, id: number, params: Record<string, any>, callback: (result: Record<string, any>) => void) {
         if (callback) {
             this.callbackMap.set(id, callback)
+            // 同 id 请求重叠时（如轮询期间 agent 响应变慢），先清除旧的超时定时器，
+            // 避免旧定时器在 30s 后用假超时错误误触发当前回调，造成"假掉线"误判
+            const oldTimer = this.timeoutMap.get(id)
+            if (oldTimer) {
+                clearTimeout(oldTimer)
+                this.timeoutMap.delete(id)
+            }
             // 请求超时保护：若 agent 长时间不响应（如网络阻塞），主动回调错误，避免卡死
             // 仅在调用方提供回调时启用，避免误伤 registerCallback 注册的事件回调（如 id=3/6）
             const timeoutMs = 30000 // 30 秒超时
