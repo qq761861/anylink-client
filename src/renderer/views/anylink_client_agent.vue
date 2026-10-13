@@ -169,8 +169,8 @@ const logPath = ref('.')
 // 断网重连相关状态
 let reconnectTimer = null
 let reconnectAttempt = 0
-const RECONNECT_BASE_DELAY = 2000 // ms
-const MAX_RECONNECT_DELAY = 10000 // ms（封顶，网络恢复后最多等 10 秒）
+const RECONNECT_BASE_DELAY = 1000 // ms
+const MAX_RECONNECT_DELAY = 3000 // ms（封顶 3 秒，网络恢复后快速重连）
 // 重连总时长上限：10 分钟内持续尝试重连，超时仍未成功则停止
 const RECONNECT_TIMEOUT = 10 * 60 * 1000 // 10 分钟
 let reconnectStartTime = 0 // 首次开始重连的时间戳
@@ -475,7 +475,7 @@ function resetReconnect() {
   }
 }
 
-// 计算退避延迟：2s, 4s, 8s, 10s（封顶）
+// 计算退避延迟：1s, 2s, 3s（封顶）
 function getReconnectDelay() {
   const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY)
   return delay
@@ -518,7 +518,7 @@ function scheduleReconnect() {
   if (typeof navigator !== 'undefined' && navigator.onLine === true) {
     networkLost = false
   }
-  // 动态计算延迟：网络正常时快速重试（退避封顶 10s），网络丢失时用较长间隔等待
+  // 动态计算延迟：网络正常时快速重试（封顶 3s），网络丢失时用封顶间隔等待
   let delay = getReconnectDelay()
   if (networkLost) {
     // 网络仍未恢复，用较长间隔等待网络恢复（避免无谓的密集重试）
