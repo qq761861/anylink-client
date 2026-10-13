@@ -88,37 +88,32 @@ class MainInit {
       this.mainWindow.show()
       if (UseStartupChart) this.loadWindow.destroy()
     })
-    // 开发模式下自动开启devtools
+    // 开发模式下自动开启devtools（生产环境不打开）
     if (process.env.NODE_ENV === 'development' || openDevTools) {
-      // this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
+      this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
     }
-    this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
 
     // 当确定渲染进程卡死时，分类型进行告警操作
+    // 先清理已有监听器，避免窗口重建时重复注册（createMainWindow 可能被多次调用）
+    app.removeAllListeners('render-process-gone')
     app.on('render-process-gone', (event, webContents, details) => {
       const message = {
-        title: "",
-        buttons: [],
+        title: "警告",
+        buttons: ['确定', '退出'],
         message: '',
       }
       switch (details.reason) {
         case 'crashed':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "图形化进程崩溃，是否进行软重启操作？"
           break;
         case 'killed':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "由于未知原因导致图形化进程被终止，是否进行软重启操作？"
           break;
         case 'oom':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "内存不足，是否软重启释放内存？"
           break;
-
         default:
+          message.message = `图形化进程异常退出（原因：${details.reason || 'unknown'}），是否进行软重启操作？`
           break;
       }
       dialog.showMessageBox(this.mainWindow, {
@@ -151,31 +146,25 @@ class MainInit {
      * @author zmr (umbrella22)
      * @date 2020-11-27
      */
+    // 先清理已有监听器，避免窗口重建时重复注册
+    app.removeAllListeners('child-process-gone')
     app.on('child-process-gone', (event, details) => {
+      // 只处理 GPU 子进程崩溃；其它子进程崩溃无需弹窗打扰用户
+      if (details.type !== 'GPU') return
       const message = {
-        title: "",
-        buttons: [],
+        title: "警告",
+        buttons: ['确定', '退出'],
         message: '',
       }
-      switch (details.type) {
-        case 'GPU':
-          switch (details.reason) {
-            case 'crashed':
-              message.title = "警告";
-              message.buttons = ['确定', '退出'];
-              message.message = "硬件加速进程已崩溃，是否关闭硬件加速并重启？";
-              break;
-            case 'killed':
-              message.title = "警告";
-              message.buttons = ['确定', '退出'];
-              message.message = "硬件加速进程被意外终止，是否关闭硬件加速并重启？";
-              break;
-            default:
-              break;
-          }
+      switch (details.reason) {
+        case 'crashed':
+          message.message = "硬件加速进程已崩溃，是否关闭硬件加速并重启？"
           break;
-
+        case 'killed':
+          message.message = "硬件加速进程被意外终止，是否关闭硬件加速并重启？"
+          break;
         default:
+          message.message = `硬件加速进程异常退出（原因：${details.reason || 'unknown'}），是否关闭硬件加速并重启？`
           break;
       }
       dialog.showMessageBox(this.mainWindow, {

@@ -24,6 +24,7 @@ export interface JsonRpcRequest {
 export class VpnAgentRpc {
     private websocket: WebSocketClient = null
     private callbackMap = new Map<number, (result: Record<string, any>) => void>();
+    private timeoutMap = new Map<number, NodeJS.Timeout>();
     private errorCallback: (error: string) => void;
     private openCallback: (error: string) => void;
     private closeCallback: (error: string) => void;
@@ -62,13 +63,15 @@ export class VpnAgentRpc {
 
         // 请求超时保护：若 agent 长时间不响应（如网络阻塞），主动回调错误，避免卡死
         const timeoutMs = 30000 // 30 秒超时
-        setTimeout(() => {
+        const timer = setTimeout(() => {
             if (this.callbackMap.has(id)) {
                 const cb = this.callbackMap.get(id)
                 this.callbackMap.delete(id)
+                this.timeoutMap.delete(id)
                 cb({ id, error: { code: -1, message: 'request timeout' } })
             }
         }, timeoutMs)
+        this.timeoutMap.set(id, timer)
     }
 
     callAsync(method: JsonRpcRequestMethod, id: number, callback: (result: Record<string, any>) => void) {
@@ -105,6 +108,12 @@ export class VpnAgentRpc {
             const cb = this.callbackMap.get(id)
             // 删除回调，避免超时定时器误触发或重复响应
             this.callbackMap.delete(id)
+            // 响应到达后清除超时定时器，避免无谓的 pending 任务残留
+            const timer = this.timeoutMap.get(id)
+            if (timer) {
+                clearTimeout(timer)
+                this.timeoutMap.delete(id)
+            }
             cb(res)
         }
     }
