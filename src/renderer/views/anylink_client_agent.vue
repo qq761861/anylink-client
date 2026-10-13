@@ -194,7 +194,14 @@ onMounted(async () => {
     vpnAgentRpc.callAsync('active', 8, (data) => {
       console.log('active ->', data)
       if (!data.result) {
+        // agent 没有活跃的 VPN 连接
         configVpn()
+        // 如果正处于断线自动重连流程中，RPC 恢复后立即触发重连
+        if (wasConnectedBeforeDisconnect && !activeDisconnect && !m_vpnConnected.value) {
+          console.log('RPC 恢复且无活跃连接，立即触发重连')
+          resetReconnect()
+          scheduleReconnect()
+        }
       } else {
         m_vpnConnected.value = true
         wasConnectedBeforeDisconnect = true
@@ -306,18 +313,24 @@ function connectVpn(reconnect, otp = '') {
 
       console.log('ws ' + method + '->:', data)
       if (data.error && Object.keys(data.error).length !== 0) {
-        if (reconnect) {
-          // 重连失败：继续由 scheduleReconnect 按退避策略调度下一次重连
-          // （不再用 setTimeout 无限递归，统一走重连调度器）
-          console.log('reconnect failed:', data.error)
+        // 处于自动重连流程中（断线后），无论快速/完整重连失败都继续调度
+        if (reconnect || isReconnecting.value) {
+          console.log(method + ' failed during auto-reconnect:', data.error)
           scheduleReconnect()
         } else {
+          // 手动首次连接失败，仅提示
           Message.error(data.error.message)
         }
       } else {
         onVpnConnected()
       }
     })
+  } else {
+    // RPC 尚未连接（agent 可能正在重启）：若处于自动重连流程，继续等待调度
+    if (isReconnecting.value) {
+      console.log('RPC 未连接，等待 RPC 恢复后重连')
+      scheduleReconnect()
+    }
   }
 
 }
@@ -512,7 +525,10 @@ function scheduleReconnect() {
       isReconnecting.value = false
       return
     }
-    connectVpn(true)
+    // 第一次尝试快速重连（reconnect），失败后降级为完整重连（connect）
+    // 因为断网时间稍长服务端会清理 session，reconnect 无法恢复，必须重新 connect
+    const useReconnect = reconnectAttempt <= 1
+    connectVpn(useReconnect)
   }, delay)
 }
 
