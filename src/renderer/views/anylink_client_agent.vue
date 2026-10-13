@@ -177,6 +177,11 @@ let reconnectStartTime = 0 // 首次开始重连的时间戳
 let wasConnectedBeforeDisconnect = false // 记录断线前是否处于已连接状态
 let statusPollTimer = null
 let networkLost = false // 系统网络是否丢失
+// 残留连接清理重试（Windows ERROR_ALREADY_EXISTS：上轮异常退出遗留的虚拟网卡/会话未清理）
+let cleaningUpStale = false // 正在执行"清理残留后重试"流程
+let cleanRetryCount = 0
+let cleanRetryTimer = null
+const MAX_CLEAN_RETRY = 3
 
 onMounted(async () => {
   userData = await ipcRenderer.invoke('get-userData')
@@ -225,7 +230,7 @@ onMounted(async () => {
   // ABORT：agent 主动通知 VPN 连接被中止/断开，这是最可靠的断线信号
   vpnAgentRpc.registerCallback(6, (res) => {
     console.log('ABORT', res)
-    if (!activeDisconnect) {
+    if (!activeDisconnect && !cleaningUpStale) {
       handleVpnDropped()
     }
   })
@@ -233,7 +238,7 @@ onMounted(async () => {
   vpnAgentRpc.registerCallback(3, (res) => {
     console.log('DISCONNECT', res)
     disconnecting.value = false
-    if (!activeDisconnect) {
+    if (!activeDisconnect && !cleaningUpStale) {
       // 非主动断开（异常断开），触发自动重连
       handleVpnDropped()
     }
@@ -313,12 +318,18 @@ function connectVpn(reconnect, otp = '') {
 
       console.log('ws ' + method + '->:', data)
       if (data.error && Object.keys(data.error).length !== 0) {
-        // 处于自动重连流程中（断线后），无论快速/完整重连失败都继续调度
-        if (reconnect || isReconnecting.value) {
+        const errMsg = String((data.error && data.error.message) || '')
+        if (isAdapterExistsError(errMsg)) {
+          // 残留虚拟网卡/会话导致连接失败：先 disconnect 清理再重试
+          console.log(method + ' failed (stale state):', data.error)
+          cleanupAndReconnect(otp)
+        } else if (reconnect || isReconnecting.value) {
+          // 处于自动重连流程中（断线后），无论快速/完整重连失败都继续调度
           console.log(method + ' failed during auto-reconnect:', data.error)
           scheduleReconnect()
         } else {
           // 手动首次连接失败，仅提示
+          cleaningUpStale = false
           Message.error(data.error.message)
         }
       } else {
@@ -330,6 +341,10 @@ function connectVpn(reconnect, otp = '') {
     if (isReconnecting.value) {
       console.log('RPC 未连接，等待 RPC 恢复后重连')
       scheduleReconnect()
+    } else if (cleaningUpStale) {
+      // 清理重试流程中 RPC 掉线：继续走清理重试（有次数上限，不会死循环）
+      console.log('RPC 未连接，稍后重试清理重连')
+      cleanupAndReconnect(otp)
     }
   }
 
@@ -341,6 +356,13 @@ function disconnectVpn() {
   activeDisconnect = true
   wasConnectedBeforeDisconnect = false
   isReconnecting.value = false
+  // 取消残留清理重试流程
+  cleaningUpStale = false
+  cleanRetryCount = 0
+  if (cleanRetryTimer) {
+    clearTimeout(cleanRetryTimer)
+    cleanRetryTimer = null
+  }
   resetReconnect()
   stopStatusPolling()
   if (vpnAgentRpc.isConnected()) {
@@ -413,6 +435,11 @@ onUnmounted(() => {
   m_vpnConnected.value = false
   stopStatusPolling()
   resetReconnect()
+  cleaningUpStale = false
+  if (cleanRetryTimer) {
+    clearTimeout(cleanRetryTimer)
+    cleanRetryTimer = null
+  }
   window.removeEventListener('online', handleNetworkOnline)
   window.removeEventListener('offline', handleNetworkOffline)
 })
@@ -491,6 +518,44 @@ function handleVpnDropped() {
   scheduleReconnect()
 }
 
+// 识别 Windows ERROR_ALREADY_EXISTS 类错误（上轮异常退出遗留的虚拟网卡/会话未清理）
+function isAdapterExistsError(errMsg) {
+  return typeof errMsg === 'string' && errMsg.toLowerCase().includes('already exists')
+}
+
+// 清理残留连接后重试：先 disconnect 让 agent 清理残留的虚拟网卡/会话，再完整重连
+function cleanupAndReconnect(otp = '') {
+  if (cleanRetryCount >= MAX_CLEAN_RETRY) {
+    // 清理重试已达上限仍未成功，放弃清理流程
+    cleaningUpStale = false
+    cleanRetryCount = 0
+    if (isReconnecting.value) {
+      // 自动重连流程中：转回常规退避重连，等待下一次尝试
+      scheduleReconnect()
+    } else {
+      isConnecting.value = false
+      Message.error('连接失败：检测到残留连接且自动清理无效，请重启软件或电脑后重试')
+    }
+    return
+  }
+  cleaningUpStale = true
+  cleanRetryCount++
+  isConnecting.value = true
+  console.log(`检测到残留连接（already exists），先 disconnect 清理再重试 (${cleanRetryCount}/${MAX_CLEAN_RETRY})`)
+  // 通知 agent 清理残留的虚拟网卡/会话
+  if (vpnAgentRpc.isConnected()) {
+    vpnAgentRpc.callAsync('disconnect', 3)
+  }
+  if (cleanRetryTimer) {
+    clearTimeout(cleanRetryTimer)
+  }
+  cleanRetryTimer = setTimeout(() => {
+    cleanRetryTimer = null
+    // 清理后用完整 connect 重建（reconnect 依赖服务端 session，残留场景下不可靠）
+    connectVpn(false, otp)
+  }, 2000)
+}
+
 // 调度自动重连（10 分钟内持续重连，指数退避，网络恢复后快速重试）
 function scheduleReconnect() {
   if (reconnectTimer) {
@@ -498,6 +563,10 @@ function scheduleReconnect() {
   }
   // 用户主动断开则不重连
   if (activeDisconnect) {
+    return
+  }
+  // 正在执行清理残留重试流程，避免双路并发重连
+  if (cleaningUpStale) {
     return
   }
   // 首次重连时记录开始时间
@@ -547,6 +616,8 @@ function scheduleReconnect() {
 // 连接成功后重置重连状态
 function onVpnConnected() {
   resetReconnect()
+  cleaningUpStale = false
+  cleanRetryCount = 0
   m_vpnConnected.value = true
   wasConnectedBeforeDisconnect = true
   isConnecting.value = false
