@@ -169,8 +169,8 @@ const logPath = ref('.')
 // 断网重连相关状态
 let reconnectTimer = null
 let reconnectAttempt = 0
-const RECONNECT_BASE_DELAY = 3000 // ms
-const MAX_RECONNECT_DELAY = 30000 // ms
+const RECONNECT_BASE_DELAY = 2000 // ms
+const MAX_RECONNECT_DELAY = 10000 // ms（封顶，网络恢复后最多等 10 秒）
 // 重连总时长上限：10 分钟内持续尝试重连，超时仍未成功则停止
 const RECONNECT_TIMEOUT = 10 * 60 * 1000 // 10 分钟
 let reconnectStartTime = 0 // 首次开始重连的时间戳
@@ -387,20 +387,22 @@ function stopStatusPolling() {
   }
 }
 
-// 系统网络恢复：网络恢复后，如果 VPN 之前处于连接状态，立即尝试重连
+// 系统网络恢复：立即取消退避等待，马上触发重连
 function handleNetworkOnline() {
   console.log('系统网络已恢复')
   networkLost = false
   if (wasConnectedBeforeDisconnect && !activeDisconnect && !m_vpnConnected.value) {
     if (!isConnecting.value) {
-      console.log('网络恢复，自动重连 VPN')
+      console.log('网络恢复，立即重连 VPN')
+      // 取消当前退避定时器，立即重连
       resetReconnect()
+      reconnectAttempt = 0
       scheduleReconnect()
     }
   }
 }
 
-// 系统网络丢失：标记网络丢失，暂停重连（等待恢复事件）
+// 系统网络丢失：标记网络丢失，重连将改用较长间隔等待网络恢复
 function handleNetworkOffline() {
   console.log('系统网络已断开')
   networkLost = true
@@ -473,7 +475,7 @@ function resetReconnect() {
   }
 }
 
-// 计算退避延迟：3s, 6s, 12s, 24s, 30s（封顶）
+// 计算退避延迟：2s, 4s, 8s, 10s（封顶）
 function getReconnectDelay() {
   const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY)
   return delay
@@ -489,7 +491,7 @@ function handleVpnDropped() {
   scheduleReconnect()
 }
 
-// 调度自动重连（10 分钟内持续重连，指数退避）
+// 调度自动重连（10 分钟内持续重连，指数退避，网络恢复后快速重试）
 function scheduleReconnect() {
   if (reconnectTimer) {
     return
@@ -511,12 +513,22 @@ function scheduleReconnect() {
     return
   }
 
-  const delay = getReconnectDelay()
+  // 实时判断网络状态：navigator.onLine 可能不准，优先用已标记的 networkLost，
+  // 但每次重连前用 navigator.onLine 做二次校正，避免 online 事件未触发导致卡住
+  if (typeof navigator !== 'undefined' && navigator.onLine === true) {
+    networkLost = false
+  }
+  // 动态计算延迟：网络正常时快速重试（退避封顶 10s），网络丢失时用较长间隔等待
+  let delay = getReconnectDelay()
+  if (networkLost) {
+    // 网络仍未恢复，用较长间隔等待网络恢复（避免无谓的密集重试）
+    delay = MAX_RECONNECT_DELAY
+  }
   reconnectAttempt++
   isConnecting.value = true
   isReconnecting.value = true
   const elapsed = Math.floor((Date.now() - reconnectStartTime) / 1000)
-  console.log(`第 ${reconnectAttempt} 次重连（已持续 ${elapsed}s），延迟 ${delay}ms`)
+  console.log(`第 ${reconnectAttempt} 次重连（已持续 ${elapsed}s），延迟 ${delay}ms，网络状态: ${networkLost ? '已断开' : '正常'}`)
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null

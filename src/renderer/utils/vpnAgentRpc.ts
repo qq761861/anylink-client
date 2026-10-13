@@ -50,7 +50,7 @@ export class VpnAgentRpc {
     }
 
     callAsyncParams(method: JsonRpcRequestMethod, id: number, params: Record<string, any>, callback: (result: Record<string, any>) => void) {
-        if (!this.callbackMap.has(id) && callback) {
+        if (callback) {
             this.callbackMap.set(id, callback)
         }
         this.sendMessage({
@@ -59,6 +59,16 @@ export class VpnAgentRpc {
             id: id,
             params: params
         })
+
+        // 请求超时保护：若 agent 长时间不响应（如网络阻塞），主动回调错误，避免卡死
+        const timeoutMs = 30000 // 30 秒超时
+        setTimeout(() => {
+            if (this.callbackMap.has(id)) {
+                const cb = this.callbackMap.get(id)
+                this.callbackMap.delete(id)
+                cb({ id, error: { code: -1, message: 'request timeout' } })
+            }
+        }, timeoutMs)
     }
 
     callAsync(method: JsonRpcRequestMethod, id: number, callback: (result: Record<string, any>) => void) {
@@ -92,7 +102,10 @@ export class VpnAgentRpc {
         const id = res['id']
 
         if (this.callbackMap.has(id)) {
-            this.callbackMap.get(id)(res)
+            const cb = this.callbackMap.get(id)
+            // 删除回调，避免超时定时器误触发或重复响应
+            this.callbackMap.delete(id)
+            cb(res)
         }
     }
 
