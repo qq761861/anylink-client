@@ -67,72 +67,40 @@ function getBinPath() {
 const vpnagent = getBinPath();
 
 const execName = "Anylink Client agent";
+
+// 统一用引号包裹 agent 路径，避免安装路径含空格时命令解析失败
+function execAgent(args: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    sudo.exec(
+      `"${vpnagent}" ${args}`,
+      { name: execName },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error(`exec error: ${error}`);
+          logSendErr(error);
+          reject(error);
+          return;
+        }
+        if (stderr) {
+          logSendErr(stderr);
+          reject(stderr);
+          return;
+        }
+        logSend(stdout);
+        resolve(stdout);
+      },
+    );
+  });
+}
+
 export default {
   InstallVpnAgent() {
-    return new Promise((resolve, reject) => {
-      sudo.exec(
-        vpnagent + " install",
-        {
-          name: execName,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            console.error(`exec error: ${error}`);
-            logSendErr(error);
-            reject(error);
-          }
-          if (stderr) {
-            logSendErr(stderr);
-            reject(stderr);
-          }
-          logSend(stdout);
-          resolve(stdout);
-        },
-      );
-    });
+    return execAgent("install");
   },
   UnInstallVpnAgent() {
-    return new Promise((resolve, reject) => {
-      sudo.exec(
-        vpnagent + " uninstall",
-        {
-          name: execName,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            logSendErr(error);
-            reject(error);
-          }
-          if (stderr) {
-            logSendErr(stderr);
-            reject(stderr);
-          }
-          logSend(stdout);
-          resolve(stdout);
-        },
-      );
-    });
+    return execAgent("uninstall");
   },
   ReInstallVpnAgent() {
-    return new Promise((resolve, reject) => {
-      sudo.exec(
-        `'${vpnagent}' reinstall`,
-        {
-          name: execName,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            logSendErr(error);
-            reject(error);
-          }
-          if (stderr) {
-            logSendErr(stderr);
-            reject(stderr);
-          }
-          logSend(stdout);
-          resolve(stdout);
-        },
-      );
-    });
+    return execAgent("reinstall");
   },
 };
