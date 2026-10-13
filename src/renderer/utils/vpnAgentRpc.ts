@@ -31,6 +31,12 @@ export class VpnAgentRpc {
     private reconnectingCallback: (attempt: number) => void;
     constructor() {
         this.websocket = new WebSocketClient()
+        // agent 的 RPC 通道必须长期可用：开启无限重连。
+        // 默认最多重连 5 次（约 48s）后彻底放弃，若 agent 服务重启/崩溃恢复慢，
+        // 客户端会永久失联，断网自动重连等逻辑全部失效。
+        this.websocket.setInfiniteReconnect(true)
+        // 缩短基础重连间隔，agent 恢复后能尽快重建通道
+        this.websocket.setReconnectInterval(2000)
         this.websocket.setCallbacks({
             onMessage: (data) => {
                 this.onRecvMessage(data)
