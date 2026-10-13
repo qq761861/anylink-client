@@ -181,7 +181,10 @@ let networkLost = false // 系统网络是否丢失
 let cleaningUpStale = false // 正在执行"清理残留后重试"流程
 let cleanRetryCount = 0
 let cleanRetryTimer = null
-const MAX_CLEAN_RETRY = 3
+// 每次清理重试前的等待时间（ms），递增给足 agent/系统移除残留网卡的时间窗口
+// 实测残留网卡从发起清理到真正消失可能需要数十秒
+const CLEAN_RETRY_DELAYS = [3000, 8000, 15000, 30000]
+const MAX_CLEAN_RETRY = CLEAN_RETRY_DELAYS.length
 
 onMounted(async () => {
   userData = await ipcRenderer.invoke('get-userData')
@@ -524,6 +527,7 @@ function isAdapterExistsError(errMsg) {
 }
 
 // 清理残留连接后重试：先 disconnect 让 agent 清理残留的虚拟网卡/会话，再完整重连
+// 等待时间递增（3s/8s/15s/30s），覆盖残留网卡移除所需的数十秒时间窗口
 function cleanupAndReconnect(otp = '') {
   if (cleanRetryCount >= MAX_CLEAN_RETRY) {
     // 清理重试已达上限仍未成功，放弃清理流程
@@ -534,14 +538,15 @@ function cleanupAndReconnect(otp = '') {
       scheduleReconnect()
     } else {
       isConnecting.value = false
-      Message.error('连接失败：检测到残留连接且自动清理无效，请重启软件或电脑后重试')
+      Message.error('连接失败：检测到残留虚拟网卡且自动清理无效，请点击断开后重试，或重启软件/电脑后重试')
     }
     return
   }
+  const delay = CLEAN_RETRY_DELAYS[cleanRetryCount]
   cleaningUpStale = true
   cleanRetryCount++
   isConnecting.value = true
-  console.log(`检测到残留连接（already exists），先 disconnect 清理再重试 (${cleanRetryCount}/${MAX_CLEAN_RETRY})`)
+  console.log(`检测到残留连接（already exists），已发送 disconnect 清理，${delay / 1000}s 后重试 (${cleanRetryCount}/${MAX_CLEAN_RETRY})`)
   // 通知 agent 清理残留的虚拟网卡/会话
   if (vpnAgentRpc.isConnected()) {
     vpnAgentRpc.callAsync('disconnect', 3)
@@ -553,7 +558,7 @@ function cleanupAndReconnect(otp = '') {
     cleanRetryTimer = null
     // 清理后用完整 connect 重建（reconnect 依赖服务端 session，残留场景下不可靠）
     connectVpn(false, otp)
-  }, 2000)
+  }, delay)
 }
 
 // 调度自动重连（10 分钟内持续重连，指数退避，网络恢复后快速重试）
