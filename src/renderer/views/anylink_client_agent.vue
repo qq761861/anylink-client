@@ -219,6 +219,10 @@ onMounted(async () => {
         isConnecting.value = s.connecting
         isReconnecting.value = s.reconnecting
         m_vpnConnected.value = s.vpnConnected
+        // 上报连接状态给主进程，用于托盘 tooltip / 菜单显示
+        if (s.vpnConnected !== wasConnected) {
+          ipcRenderer.send('vpn-status', s.vpnConnected)
+        }
         // 连接建立（含自动重连成功）后启动掉线检测轮询
         if (s.vpnConnected && !wasConnected) {
           connectBtnDisable.value = false

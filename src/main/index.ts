@@ -1,6 +1,7 @@
 'use strict'
 import { app } from 'electron'
 import InitWindow from './services/windowManager'
+import { destroyTray } from './services/trayManager'
 import DisableButton from './config/DisableButton'
 import electronDevtoolsInstaller, { VUEJS_DEVTOOLS } from 'electron-devtools-installer'
 import { DisableF12 } from './config/const'
@@ -23,10 +24,11 @@ app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors')
 
 app.on('will-quit', () => {
     if (backendProcess) backendProcess.kill();
+    destroyTray();
 });
-app.on('window-all-closed', () => {
-  app.quit()
-})
+// 应用常驻系统托盘：即使所有窗口关闭也不退出，
+// 保证断网后重连状态机仍在后台运行（真正退出走托盘菜单「退出」）
+app.on('window-all-closed', () => {})
 app.on('browser-window-created', () => {
   console.log('window-created')
 })

@@ -2,6 +2,10 @@ asar: true
 asarUnpack:
   - bin/**
 extraFiles: []
+# 托盘图标：打包后位于 resources/icons/，主进程经 process.resourcesPath 读取
+extraResources:
+  - from: config/icons
+    to: icons
 productName: Anylink Client
 appId: anylink-client
 directories:

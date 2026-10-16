@@ -1,5 +1,6 @@
 import setIpc from './ipcMain'
 import menuconfig from '../config/menu'
+import { createTray, showMinimizeTip } from './trayManager'
 
 import { app, BrowserWindow, Menu, dialog } from 'electron'
 import { platform } from 'os'
@@ -12,6 +13,10 @@ class MainInit {
   public shartURL: string = ''
   public loadWindow: BrowserWindow = null
   public mainWindow: BrowserWindow = null
+  // 是否正在退出应用：true 时关闭窗口走真实关闭（托盘「退出」按钮）
+  public isQuitting = false
+  // 是否已提示过「最小化到托盘」（只提示一次，避免打扰）
+  public hideTipShown = false
 
   constructor() {
     console.log("process.env.userConfig",process.env.userConfig)
@@ -52,6 +57,8 @@ class MainInit {
         nodeIntegration: true,
         nodeIntegrationInWorker: true,
         webSecurity: false,
+        // 关键：窗口隐藏到托盘后不节流定时器，保证断网重连状态机在后台全速运行
+        backgroundThrottling: false,
         // 如果是开发模式可以使用devTools
         devTools: process.env.NODE_ENV === 'development' || openDevTools,
         // devTools: true,
@@ -186,6 +193,35 @@ class MainInit {
     this.mainWindow.on('closed', () => {
       this.mainWindow = null
     })
+    // 关闭窗口 = 最小化到系统托盘：进程与 VPN 断线重连逻辑继续在后台运行，
+    // 网络恢复后自动重连。真正退出需通过托盘菜单的「退出」。
+    this.mainWindow.on('close', (event) => {
+      if (this.isQuitting) return
+      event.preventDefault()
+      this.mainWindow.hide()
+      if (!this.hideTipShown) {
+        this.hideTipShown = true
+        showMinimizeTip(this.mainWindow)
+      }
+    })
+    // 创建系统托盘（常驻后台的入口）
+    createTray({
+      showWindow: () => this.showMainWindow(),
+      onQuit: () => {
+        this.isQuitting = true
+        app.quit()
+      }
+    })
+  }
+  // 从托盘重新打开主界面
+  showMainWindow() {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      this.createMainWindow()
+      return
+    }
+    if (this.mainWindow.isMinimized()) this.mainWindow.restore()
+    this.mainWindow.show()
+    this.mainWindow.focus()
   }
   // 加载窗口函数
   loadingWindow(loadingURL: string) {
