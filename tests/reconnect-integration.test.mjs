@@ -74,6 +74,7 @@ test('断网后自动重连，网络恢复后连上并停止重连（集成链�
         )
       },
       cleanup: () => rpc.callAsync('disconnect', 3),
+      checkActive: (cb) => cb(null),
       isOnline: () => online,
       onUpdate: (s) => { state.connecting = s.connecting; state.reconnecting = s.reconnecting; state.vpnConnected = s.vpnConnected },
       notify: () => {},
@@ -155,6 +156,7 @@ test('连接失败为 already exists 时，先发 disconnect 清理再重试（�
         // 状态机要求清理：向 agent 发 disconnect（ws.send 已统一记录请求）
         rpc.callAsync('disconnect', 3)
       },
+      checkActive: (cb) => cb(null),
       isOnline: () => true,
       onUpdate: (s) => { state.vpnConnected = s.vpnConnected },
       notify: () => {},

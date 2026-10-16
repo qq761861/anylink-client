@@ -55,6 +55,8 @@ function harness(options) {
       connect: (mode, otp, seq) => events.push({ type: 'connect', mode, seq, at: env.now(), done: false }),
       cleanup: () => events.push({ type: 'cleanup', at: env.now() }),
       isOnline: () => online,
+      // 默认无法判断（立即返回 null），保持与旧版调度时序一致
+      checkActive: (cb) => cb(null),
       onUpdate: (s) => {
         state.connecting = s.connecting
         state.reconnecting = s.reconnecting

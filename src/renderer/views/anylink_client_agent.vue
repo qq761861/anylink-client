@@ -198,6 +198,21 @@ onMounted(async () => {
           vpnAgentRpc.callAsync('disconnect', 3)
         }
       },
+      // 向 agent 核实是否存在活跃的 VPN 连接（休眠唤醒/重连失败后的兜底核实）
+      checkActive: (cb) => {
+        if (!vpnAgentRpc || !vpnAgentRpc.isConnected()) {
+          cb(null)
+          return
+        }
+        vpnAgentRpc.callAsync('active', 8, (data) => {
+          const hasError = data.error && Object.keys(data.error).length !== 0
+          if (hasError) {
+            cb(null)
+            return
+          }
+          cb(!!data.result)
+        })
+      },
       isOnline: () => (typeof navigator !== 'undefined' ? navigator.onLine !== false : true),
       onUpdate: (s) => {
         const wasConnected = m_vpnConnected.value

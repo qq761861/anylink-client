@@ -29,6 +29,13 @@ export interface ReconnectHooks {
   cleanup: () => void
   /** 系统网络是否可用 */
   isOnline: () => boolean
+  /**
+   * 向 agent 核实是否存在活跃的 VPN 连接（active RPC）
+   * - cb(true)：有活跃连接
+   * - cb(false)：无活跃连接
+   * - cb(null)：无法判断（agent 无响应/RPC 不可用），调用方需自行兜底
+   */
+  checkActive: (cb: (active: boolean | null) => void) => void
   /** UI 状态同步 */
   onUpdate: (state: ReconnectState) => void
   /** 提示信息 */
@@ -104,6 +111,8 @@ export class ReconnectController {
   private cleaningUpStale = false
   private pollFailCount = 0
   private stopped = false
+  /** 正在向 agent 核实连接状态（防重入） */
+  private verifying = false
 
   constructor(hooks: ReconnectHooks, env: ReconnectEnv, options?: Partial<ReconnectOptions>) {
     this.hooks = hooks
@@ -183,7 +192,14 @@ export class ReconnectController {
     this.networkLost = false
     if (this.stopped) return
     if (!this.wasConnected || this.activeDisconnect) return
-    if (this.vpnConnected) return
+
+    // 关键修复：休眠唤醒/IP 切换等场景下系统不触发 offline 事件，
+    // 此时我们可能仍标记"已连接"但隧道实际已死——主动向 agent 核实，
+    // 而不是直接 return 干等轮询报错（原实现在此直接返回，导致有时不重连）
+    if (this.vpnConnected) {
+      this.verifyActiveWhileConnected()
+      return
+    }
 
     // 关键修复：不再被 connecting 阻塞。若当前有挂起的尝试（agent 卡在握手），
     // 直接放弃等待进入重连，避免"网络已恢复但要等挂起请求超时"的长时间空等
@@ -234,8 +250,8 @@ export class ReconnectController {
       return
     }
     if (this.reconnecting) {
-      this.log('自动重连尝试失败，继续调度', errMsg)
-      this.scheduleReconnect()
+      this.log('自动重连尝试失败，先核实 agent 连接状态', errMsg)
+      this.verifyActiveThenSchedule()
       return
     }
     this.hooks.notify?.('error', errMsg)
@@ -310,6 +326,65 @@ export class ReconnectController {
     this.clearTimer(this.attemptWatch)
     this.attemptWatch = null
     this.setConnecting(false)
+  }
+
+  /**
+   * 向 agent 核实连接状态（带 5 秒超时保护，结果 null 表示无法判断）
+   */
+  private queryActive(cb: (active: boolean | null) => void): void {
+    let settled = false
+    const done = (active: boolean | null) => {
+      if (settled) return
+      settled = true
+      cb(active)
+    }
+    const guard = this.env.setTimeout(() => done(null), 5000)
+    this.hooks.checkActive((active) => {
+      this.env.clearTimeout(guard)
+      done(active)
+    })
+  }
+
+  /**
+   * 场景：仍标记"已连接"但收到网络恢复事件（休眠唤醒/IP 切换不触发 offline）。
+   * 主动向 agent 核实隧道是否真的还活着；已死则立即进入重连
+   */
+  private verifyActiveWhileConnected(): void {
+    if (this.verifying) return
+    this.verifying = true
+    this.queryActive((active) => {
+      this.verifying = false
+      if (this.stopped || this.activeDisconnect) return
+      if (active === false) {
+        this.log('核实：agent 无活跃连接（隧道实际已断），进入重连')
+        this.notifyDropped('verify-active')
+      } else if (active === true) {
+        this.log('核实：连接仍然有效，无需重连')
+      }
+      // active === null：无法判断（agent 无响应），交由轮询兜底
+    })
+  }
+
+  /**
+   * 场景：自动重连尝试失败，但那次尝试可能实际已经成功（结果迟到/被放弃），
+   * agent 已处于连接状态，再次 connect 会一直失败——先核实再调度
+   */
+  private verifyActiveThenSchedule(): void {
+    if (this.verifying) {
+      this.scheduleReconnect()
+      return
+    }
+    this.verifying = true
+    this.queryActive((active) => {
+      this.verifying = false
+      if (this.stopped || this.activeDisconnect) return
+      if (active === true) {
+        this.log('核实：agent 已有活跃连接，按连接成功处理，停止重连')
+        this.markConnected()
+        return
+      }
+      this.scheduleReconnect()
+    })
   }
 
   /**
