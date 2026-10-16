@@ -12,7 +12,8 @@
     "build:linux": "cross-env BUILD_TARGET=clean node .electron-vue/build.js  && cross-env AGENT_ARCH=amd64 electron-builder --linux --x64 && cross-env AGENT_ARCH=arm electron-builder --linux --armv7l && cross-env AGENT_ARCH=arm64 electron-builder --linux --arm64",
     "build:all": "cross-env BUILD_TARGET=clean node .electron-vue/build.js && cross-env AGENT_ARCH=386 electron-builder --win --ia32 && cross-env AGENT_ARCH=amd64 electron-builder --win --x64 && cross-env AGENT_ARCH=arm64 electron-builder --win --arm64 && cross-env AGENT_ARCH=amd64 electron-builder --mac --x64 && cross-env AGENT_ARCH=arm64 electron-builder --mac --arm64  && cross-env AGENT_ARCH=amd64 electron-builder --linux --x64 && cross-env AGENT_ARCH=arm electron-builder --linux --armv7l && cross-env AGENT_ARCH=arm64 electron-builder --linux --arm64",
     "build:dir": "cross-env BUILD_TARGET=clean node .electron-vue/build.js  && electron-builder --dir",
-    "build:clean": "cross-env BUILD_TARGET=onlyClean node .electron-vue/build.js"
+    "build:clean": "cross-env BUILD_TARGET=onlyClean node .electron-vue/build.js",
+    "test": "node --experimental-transform-types --import ./tests/_register.mjs --test \"tests/*.test.mjs\""
   },
   "dependencies": {
     "pinia": "^3.0.3",

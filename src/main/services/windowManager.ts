@@ -1,5 +1,6 @@
 import setIpc from './ipcMain'
 import menuconfig from '../config/menu'
+import { createTray, showMinimizeTip } from './trayManager'
 
 import { app, BrowserWindow, Menu, dialog } from 'electron'
 import { platform } from 'os'
@@ -12,6 +13,10 @@ class MainInit {
   public shartURL: string = ''
   public loadWindow: BrowserWindow = null
   public mainWindow: BrowserWindow = null
+  // 是否正在退出应用：true 时关闭窗口走真实关闭（托盘「退出」按钮）
+  public isQuitting = false
+  // 是否已提示过「最小化到托盘」（只提示一次，避免打扰）
+  public hideTipShown = false
 
   constructor() {
     console.log("process.env.userConfig",process.env.userConfig)
@@ -52,6 +57,8 @@ class MainInit {
         nodeIntegration: true,
         nodeIntegrationInWorker: true,
         webSecurity: false,
+        // 关键：窗口隐藏到托盘后不节流定时器，保证断网重连状态机在后台全速运行
+        backgroundThrottling: false,
         // 如果是开发模式可以使用devTools
         devTools: process.env.NODE_ENV === 'development' || openDevTools,
         // devTools: true,
@@ -88,37 +95,32 @@ class MainInit {
       this.mainWindow.show()
       if (UseStartupChart) this.loadWindow.destroy()
     })
-    // 开发模式下自动开启devtools
+    // 开发模式下自动开启devtools（生产环境不打开）
     if (process.env.NODE_ENV === 'development' || openDevTools) {
-      // this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
+      this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
     }
-    this.mainWindow.webContents.openDevTools({ mode: 'undocked', activate: true })
 
     // 当确定渲染进程卡死时，分类型进行告警操作
+    // 先清理已有监听器，避免窗口重建时重复注册（createMainWindow 可能被多次调用）
+    app.removeAllListeners('render-process-gone')
     app.on('render-process-gone', (event, webContents, details) => {
       const message = {
-        title: "",
-        buttons: [],
+        title: "警告",
+        buttons: ['确定', '退出'],
         message: '',
       }
       switch (details.reason) {
         case 'crashed':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "图形化进程崩溃，是否进行软重启操作？"
           break;
         case 'killed':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "由于未知原因导致图形化进程被终止，是否进行软重启操作？"
           break;
         case 'oom':
-          message.title = "警告"
-          message.buttons = ['确定', '退出']
           message.message = "内存不足，是否软重启释放内存？"
           break;
-
         default:
+          message.message = `图形化进程异常退出（原因：${details.reason || 'unknown'}），是否进行软重启操作？`
           break;
       }
       dialog.showMessageBox(this.mainWindow, {
@@ -151,31 +153,25 @@ class MainInit {
      * @author zmr (umbrella22)
      * @date 2020-11-27
      */
+    // 先清理已有监听器，避免窗口重建时重复注册
+    app.removeAllListeners('child-process-gone')
     app.on('child-process-gone', (event, details) => {
+      // 只处理 GPU 子进程崩溃；其它子进程崩溃无需弹窗打扰用户
+      if (details.type !== 'GPU') return
       const message = {
-        title: "",
-        buttons: [],
+        title: "警告",
+        buttons: ['确定', '退出'],
         message: '',
       }
-      switch (details.type) {
-        case 'GPU':
-          switch (details.reason) {
-            case 'crashed':
-              message.title = "警告";
-              message.buttons = ['确定', '退出'];
-              message.message = "硬件加速进程已崩溃，是否关闭硬件加速并重启？";
-              break;
-            case 'killed':
-              message.title = "警告";
-              message.buttons = ['确定', '退出'];
-              message.message = "硬件加速进程被意外终止，是否关闭硬件加速并重启？";
-              break;
-            default:
-              break;
-          }
+      switch (details.reason) {
+        case 'crashed':
+          message.message = "硬件加速进程已崩溃，是否关闭硬件加速并重启？"
           break;
-
+        case 'killed':
+          message.message = "硬件加速进程被意外终止，是否关闭硬件加速并重启？"
+          break;
         default:
+          message.message = `硬件加速进程异常退出（原因：${details.reason || 'unknown'}），是否关闭硬件加速并重启？`
           break;
       }
       dialog.showMessageBox(this.mainWindow, {
@@ -197,6 +193,35 @@ class MainInit {
     this.mainWindow.on('closed', () => {
       this.mainWindow = null
     })
+    // 关闭窗口 = 最小化到系统托盘：进程与 VPN 断线重连逻辑继续在后台运行，
+    // 网络恢复后自动重连。真正退出需通过托盘菜单的「退出」。
+    this.mainWindow.on('close', (event) => {
+      if (this.isQuitting) return
+      event.preventDefault()
+      this.mainWindow.hide()
+      if (!this.hideTipShown) {
+        this.hideTipShown = true
+        showMinimizeTip(this.mainWindow)
+      }
+    })
+    // 创建系统托盘（常驻后台的入口）
+    createTray({
+      showWindow: () => this.showMainWindow(),
+      onQuit: () => {
+        this.isQuitting = true
+        app.quit()
+      }
+    })
+  }
+  // 从托盘重新打开主界面
+  showMainWindow() {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      this.createMainWindow()
+      return
+    }
+    if (this.mainWindow.isMinimized()) this.mainWindow.restore()
+    this.mainWindow.show()
+    this.mainWindow.focus()
   }
   // 加载窗口函数
   loadingWindow(loadingURL: string) {

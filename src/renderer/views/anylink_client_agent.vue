@@ -156,33 +156,95 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { VpnAgentRpc } from '@renderer/utils/vpnAgentRpc';
+import { ReconnectController } from '@renderer/utils/reconnectController';
 import { ipcRenderer } from 'electron';
 import { Message } from '@arco-design/web-vue';
 import NetworkStatusDot from './components/NetworkStatusDot.vue';
 import OtpCodeInput from '@renderer/components/OtpCodeInput/index.vue';
 const path = require('path');
 
-let activeDisconnect = false
 let vpnAgentRpc = null
 let userData = ''
 const logPath = ref('.')
-// 断网重连相关状态
-let reconnectTimer = null
-let reconnectAttempt = 0
-const RECONNECT_BASE_DELAY = 1000 // ms
-const MAX_RECONNECT_DELAY = 3000 // ms（封顶 3 秒，网络恢复后快速重连）
-// 重连总时长上限：10 分钟内持续尝试重连，超时仍未成功则停止
-const RECONNECT_TIMEOUT = 10 * 60 * 1000 // 10 分钟
-let reconnectStartTime = 0 // 首次开始重连的时间戳
-let wasConnectedBeforeDisconnect = false // 记录断线前是否处于已连接状态
 let statusPollTimer = null
-let networkLost = false // 系统网络是否丢失
+// VPN 断线自动重连状态机：退避调度、掉线检出、清理重试等全部逻辑集中在此，
+// 视图只负责执行 RPC 动作与展示状态（逻辑见 utils/reconnectController.ts）
+let reconnectCtrl = null
 
 onMounted(async () => {
   userData = await ipcRenderer.invoke('get-userData')
   logPath.value = path.join(path.join(userData, 'anylink_client'))
   console.log('userData', userData)
   vpnAgentRpc = new VpnAgentRpc()
+
+  // 初始化断线自动重连状态机
+  reconnectCtrl = new ReconnectController(
+    {
+      // 发起连接：mode='reconnect' 快速重连，mode='connect' 完整重连
+      connect: (mode, otp, seq) => {
+        const isReconnect = mode === 'reconnect'
+        const method = isReconnect ? 'reconnect' : 'connect'
+        const id = isReconnect ? 4 : 2
+        vpnAgentRpc.callAsyncParams(method, id, buildConnectParams(otp), (data) => {
+          console.log('ws ' + method + '->:', data)
+          const hasError = data.error && Object.keys(data.error).length !== 0
+          const errMsg = hasError ? String(data.error.message || '') : null
+          reconnectCtrl.notifyConnectResult(errMsg, seq)
+        })
+      },
+      // 通知 agent 清理残留的虚拟网卡/会话
+      cleanup: () => {
+        if (vpnAgentRpc.isConnected()) {
+          vpnAgentRpc.callAsync('disconnect', 3)
+        }
+      },
+      // 向 agent 核实是否存在活跃的 VPN 连接（休眠唤醒/重连失败后的兜底核实）
+      checkActive: (cb) => {
+        if (!vpnAgentRpc || !vpnAgentRpc.isConnected()) {
+          cb(null)
+          return
+        }
+        vpnAgentRpc.callAsync('active', 8, (data) => {
+          const hasError = data.error && Object.keys(data.error).length !== 0
+          if (hasError) {
+            cb(null)
+            return
+          }
+          cb(!!data.result)
+        })
+      },
+      isOnline: () => (typeof navigator !== 'undefined' ? navigator.onLine !== false : true),
+      onUpdate: (s) => {
+        const wasConnected = m_vpnConnected.value
+        isConnecting.value = s.connecting
+        isReconnecting.value = s.reconnecting
+        m_vpnConnected.value = s.vpnConnected
+        // 上报连接状态给主进程，用于托盘 tooltip / 菜单显示
+        if (s.vpnConnected !== wasConnected) {
+          ipcRenderer.send('vpn-status', s.vpnConnected)
+        }
+        // 连接建立（含自动重连成功）后启动掉线检测轮询
+        if (s.vpnConnected && !wasConnected) {
+          connectBtnDisable.value = false
+          startStatusPolling()
+          getStatusVpn()
+          getStatVpn()
+        }
+      },
+      notify: (level, message) => {
+        if (level === 'warning') Message.warning(message)
+        else if (level === 'info') Message.info(message)
+        else if (level === 'success') Message.success(message)
+        else Message.error(message)
+      },
+      log: (...args) => console.log('[reconnect]', ...args)
+    },
+    {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      now: () => Date.now()
+    }
+  )
 
   vpnAgentRpc.onError(msg => {
     console.log('onError', msg)
@@ -196,20 +258,10 @@ onMounted(async () => {
       if (!data.result) {
         // agent 没有活跃的 VPN 连接
         configVpn()
-        // 如果正处于断线自动重连流程中，RPC 恢复后立即触发重连
-        if (wasConnectedBeforeDisconnect && !activeDisconnect && !m_vpnConnected.value) {
-          console.log('RPC 恢复且无活跃连接，立即触发重连')
-          resetReconnect()
-          scheduleReconnect()
-        }
       } else {
-        m_vpnConnected.value = true
-        wasConnectedBeforeDisconnect = true
-        connectBtnDisable.value = false
-        getStatVpn()
-        getStatusVpn()
-        // 开始周期性检测 VPN 连接状态，发现掉线自动重连
-        startStatusPolling()
+        // agent 侧已有活跃连接：同步为已连接状态。
+        // 状态机会通过 onUpdate 通知视图，由视图统一启动掉线检测轮询（避免重复启动）
+        reconnectCtrl.markConnected()
       }
     })
 
@@ -225,22 +277,17 @@ onMounted(async () => {
   // ABORT：agent 主动通知 VPN 连接被中止/断开，这是最可靠的断线信号
   vpnAgentRpc.registerCallback(6, (res) => {
     console.log('ABORT', res)
-    if (!activeDisconnect) {
-      handleVpnDropped()
-    }
+    reconnectCtrl.notifyDropped('ABORT')
   })
   // DISCONNECT：断开完成（用户主动断开或异常断开都会触发）
   vpnAgentRpc.registerCallback(3, (res) => {
     console.log('DISCONNECT', res)
     disconnecting.value = false
-    if (!activeDisconnect) {
-      // 非主动断开（异常断开），触发自动重连
-      handleVpnDropped()
-    }
+    reconnectCtrl.notifyDropped('DISCONNECT')
   })
   vpnAgentRpc.connectToServer('ws://127.0.0.1:7210/rpc')
 
-  // 监听系统网络状态变化，网络恢复后自动重连
+  // 监听系统网络状态变化：断网立即进入重连，网络恢复立即重连
   window.addEventListener('online', handleNetworkOnline)
   window.addEventListener('offline', handleNetworkOffline)
 
@@ -300,48 +347,22 @@ function buildConnectParams(otp = '') {
 }
 
 function connectVpn(reconnect, otp = '') {
+  if (!reconnectCtrl) return
+  // 手动点击连接：解除"主动断开"抑制，避免后续掉线信号被永久忽略
+  reconnectCtrl.markManualConnectStart()
   if (vpnAgentRpc.isConnected()) {
-    let method = 'connect'
-    let id = 2
-    if (reconnect) {
-      method = 'reconnect'
-      id = 4
-    }
-    isConnecting.value = true
-    vpnAgentRpc.callAsyncParams(method, id, buildConnectParams(otp), (data) => {
-      isConnecting.value = false
-
-      console.log('ws ' + method + '->:', data)
-      if (data.error && Object.keys(data.error).length !== 0) {
-        // 处于自动重连流程中（断线后），无论快速/完整重连失败都继续调度
-        if (reconnect || isReconnecting.value) {
-          console.log(method + ' failed during auto-reconnect:', data.error)
-          scheduleReconnect()
-        } else {
-          // 手动首次连接失败，仅提示
-          Message.error(data.error.message)
-        }
-      } else {
-        onVpnConnected()
-      }
-    })
+    // 由状态机统一发起：它会记录在途尝试序号并挂上看门狗（断网时 10s 判定失败）
+    reconnectCtrl.beginAttempt(reconnect ? 'reconnect' : 'connect', otp)
   } else {
-    // RPC 尚未连接（agent 可能正在重启）：若处于自动重连流程，继续等待调度
-    if (isReconnecting.value) {
-      console.log('RPC 未连接，等待 RPC 恢复后重连')
-      scheduleReconnect()
-    }
+    // RPC 尚未连接（agent 可能正在重启）：交由状态机决定继续等待或清理重试
+    reconnectCtrl.notifyRpcUnavailable()
   }
-
 }
 
 function disconnectVpn() {
   disconnecting.value = true
-  // 主动断开：停止自动重连与状态轮询
-  activeDisconnect = true
-  wasConnectedBeforeDisconnect = false
-  isReconnecting.value = false
-  resetReconnect()
+  // 停止自动重连与状态轮询，并复位掉线判定计数
+  reconnectCtrl && reconnectCtrl.markManualDisconnect()
   stopStatusPolling()
   if (vpnAgentRpc.isConnected()) {
     vpnAgentRpc.callAsync('disconnect', 3)
@@ -357,14 +378,13 @@ function getStatusVpn() {
       vpnStatus.value = data.result ? data.result : {}
     }
     console.log('ws status->:', data)
-    // 检测 VPN 是否已断开：请求返回错误或 result 为空说明连接已失效
-    if (m_vpnConnected.value && !activeDisconnect) {
-      const hasError = data.error && Object.keys(data.error).length !== 0
-      const emptyResult = !data.result || Object.keys(data.result).length === 0
-      if (hasError || emptyResult) {
-        console.log('检测到 VPN 连接已断开，准备自动重连', data)
-        handleVpnDropped()
-      }
+    // 掉线判定交给状态机做防抖（连续失败多次才算掉线），避免单次瞬时错误误判
+    const hasError = data.error && Object.keys(data.error).length !== 0
+    const emptyResult = !data.result || Object.keys(data.result).length === 0
+    if (hasError || emptyResult) {
+      reconnectCtrl && reconnectCtrl.notifyPollFailure()
+    } else {
+      reconnectCtrl && reconnectCtrl.notifyPollSuccess()
     }
   })
 }
@@ -373,7 +393,7 @@ function getStatusVpn() {
 function startStatusPolling() {
   stopStatusPolling()
   statusPollTimer = setInterval(() => {
-    if (!m_vpnConnected.value || activeDisconnect || isConnecting.value) {
+    if (!m_vpnConnected.value || isConnecting.value) {
       return
     }
     getStatusVpn()
@@ -387,32 +407,23 @@ function stopStatusPolling() {
   }
 }
 
-// 系统网络恢复：立即取消退避等待，马上触发重连
+// 系统网络恢复：交给状态机，放弃挂起的尝试并立即重连
 function handleNetworkOnline() {
   console.log('系统网络已恢复')
-  networkLost = false
-  if (wasConnectedBeforeDisconnect && !activeDisconnect && !m_vpnConnected.value) {
-    if (!isConnecting.value) {
-      console.log('网络恢复，立即重连 VPN')
-      // 取消当前退避定时器，立即重连
-      resetReconnect()
-      reconnectAttempt = 0
-      scheduleReconnect()
-    }
-  }
+  reconnectCtrl && reconnectCtrl.notifyNetworkOnline()
 }
 
-// 系统网络丢失：标记网络丢失，重连将改用较长间隔等待网络恢复
+// 系统网络丢失：状态机会立即判定 VPN 已断并进入重连，无需等待轮询连续失败
 function handleNetworkOffline() {
   console.log('系统网络已断开')
-  networkLost = true
+  reconnectCtrl && reconnectCtrl.notifyNetworkOffline()
 }
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 onUnmounted(() => {
   m_vpnConnected.value = false
   stopStatusPolling()
-  resetReconnect()
+  reconnectCtrl && reconnectCtrl.destroy()
   window.removeEventListener('online', handleNetworkOnline)
   window.removeEventListener('offline', handleNetworkOffline)
 })
@@ -447,115 +458,17 @@ async function getStatVpn() {
     console.log('ws stat->:', data)
     if (m_vpnConnected.value && !data.error) {
       vpnStat.value = data.result
+      // stat 正常，通知状态机复位掉线判定计数
+      reconnectCtrl && reconnectCtrl.notifyPollSuccess()
       await sleep(1000);
       getStatVpn()
-    } else if (m_vpnConnected.value && data.error && !activeDisconnect) {
-      // stat 请求返回错误，说明 VPN 连接已断开，触发自动重连
-      console.log('stat 检测到 VPN 断开，触发自动重连')
-      handleVpnDropped()
+    } else if (m_vpnConnected.value && data.error) {
+      // stat 请求返回错误：交给状态机做防抖计数（连续多次失败才判定掉线）
+      reconnectCtrl && reconnectCtrl.notifyPollFailure()
     }
   })
 }
 
-function reconnectVpn() {
-  vpnAgentRpc.callAsync('reconnect', 4, (data) => {
-    console.log('ws reconnect->:', data)
-  })
-}
-
-// ===== 断网自动重连逻辑 =====
-
-// 重置重连状态
-function resetReconnect() {
-  reconnectAttempt = 0
-  reconnectStartTime = 0
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-}
-
-// 计算退避延迟：1s, 2s, 3s（封顶）
-function getReconnectDelay() {
-  const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY)
-  return delay
-}
-
-// VPN 意外掉线时的处理入口
-function handleVpnDropped() {
-  if (activeDisconnect) {
-    return
-  }
-  m_vpnConnected.value = false
-  wasConnectedBeforeDisconnect = true
-  scheduleReconnect()
-}
-
-// 调度自动重连（10 分钟内持续重连，指数退避，网络恢复后快速重试）
-function scheduleReconnect() {
-  if (reconnectTimer) {
-    return
-  }
-  // 用户主动断开则不重连
-  if (activeDisconnect) {
-    return
-  }
-  // 首次重连时记录开始时间
-  if (reconnectStartTime === 0) {
-    reconnectStartTime = Date.now()
-  }
-  // 超过 10 分钟仍未成功，停止自动重连
-  if (Date.now() - reconnectStartTime >= RECONNECT_TIMEOUT) {
-    console.log('重连已超过 10 分钟，停止自动重连')
-    isConnecting.value = false
-    isReconnecting.value = false
-    Message.warning('网络连接失败，已持续重连 10 分钟，请检查网络后手动重试')
-    return
-  }
-
-  // 实时判断网络状态：navigator.onLine 可能不准，优先用已标记的 networkLost，
-  // 但每次重连前用 navigator.onLine 做二次校正，避免 online 事件未触发导致卡住
-  if (typeof navigator !== 'undefined' && navigator.onLine === true) {
-    networkLost = false
-  }
-  // 动态计算延迟：网络正常时快速重试（封顶 3s），网络丢失时用封顶间隔等待
-  let delay = getReconnectDelay()
-  if (networkLost) {
-    // 网络仍未恢复，用较长间隔等待网络恢复（避免无谓的密集重试）
-    delay = MAX_RECONNECT_DELAY
-  }
-  reconnectAttempt++
-  isConnecting.value = true
-  isReconnecting.value = true
-  const elapsed = Math.floor((Date.now() - reconnectStartTime) / 1000)
-  console.log(`第 ${reconnectAttempt} 次重连（已持续 ${elapsed}s），延迟 ${delay}ms，网络状态: ${networkLost ? '已断开' : '正常'}`)
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    if (activeDisconnect) {
-      isConnecting.value = false
-      isReconnecting.value = false
-      return
-    }
-    // 第一次尝试快速重连（reconnect），失败后降级为完整重连（connect）
-    // 因为断网时间稍长服务端会清理 session，reconnect 无法恢复，必须重新 connect
-    const useReconnect = reconnectAttempt <= 1
-    connectVpn(useReconnect)
-  }, delay)
-}
-
-// 连接成功后重置重连状态
-function onVpnConnected() {
-  resetReconnect()
-  m_vpnConnected.value = true
-  wasConnectedBeforeDisconnect = true
-  isConnecting.value = false
-  isReconnecting.value = false
-  activeDisconnect = false
-  startStatusPolling()
-  getStatusVpn()
-  getStatVpn()
-}
 
 const notInstallVpnAgent = ref(false)
 
@@ -653,8 +566,7 @@ const toggleConnection = async () => {
 }
 
 function startConnect(otp = '') {
-  isReconnecting.value = false
-  resetReconnect()
+  // 手动连接：状态机会解除"主动断开"抑制并复位退避计数
   connectVpn(false, otp)
   connectionTime.value = new Date().toLocaleString()
 }

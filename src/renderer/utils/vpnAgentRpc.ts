@@ -24,12 +24,19 @@ export interface JsonRpcRequest {
 export class VpnAgentRpc {
     private websocket: WebSocketClient = null
     private callbackMap = new Map<number, (result: Record<string, any>) => void>();
+    private timeoutMap = new Map<number, NodeJS.Timeout>();
     private errorCallback: (error: string) => void;
     private openCallback: (error: string) => void;
     private closeCallback: (error: string) => void;
     private reconnectingCallback: (attempt: number) => void;
     constructor() {
         this.websocket = new WebSocketClient()
+        // agent 的 RPC 通道必须长期可用：开启无限重连。
+        // 默认最多重连 5 次（约 48s）后彻底放弃，若 agent 服务重启/崩溃恢复慢，
+        // 客户端会永久失联，断网自动重连等逻辑全部失效。
+        this.websocket.setInfiniteReconnect(true)
+        // 缩短基础重连间隔，agent 恢复后能尽快重建通道
+        this.websocket.setReconnectInterval(2000)
         this.websocket.setCallbacks({
             onMessage: (data) => {
                 this.onRecvMessage(data)
@@ -52,6 +59,25 @@ export class VpnAgentRpc {
     callAsyncParams(method: JsonRpcRequestMethod, id: number, params: Record<string, any>, callback: (result: Record<string, any>) => void) {
         if (callback) {
             this.callbackMap.set(id, callback)
+            // 同 id 请求重叠时（如轮询期间 agent 响应变慢），先清除旧的超时定时器，
+            // 避免旧定时器在 30s 后用假超时错误误触发当前回调，造成"假掉线"误判
+            const oldTimer = this.timeoutMap.get(id)
+            if (oldTimer) {
+                clearTimeout(oldTimer)
+                this.timeoutMap.delete(id)
+            }
+            // 请求超时保护：若 agent 长时间不响应（如网络阻塞），主动回调错误，避免卡死
+            // 仅在调用方提供回调时启用，避免误伤 registerCallback 注册的事件回调（如 id=3/6）
+            const timeoutMs = 30000 // 30 秒超时
+            const timer = setTimeout(() => {
+                if (this.callbackMap.has(id)) {
+                    const cb = this.callbackMap.get(id)
+                    this.callbackMap.delete(id)
+                    this.timeoutMap.delete(id)
+                    cb({ id, error: { code: -1, message: 'request timeout' } })
+                }
+            }, timeoutMs)
+            this.timeoutMap.set(id, timer)
         }
         this.sendMessage({
             jsonrpc: JSONRPC_VERSION,
@@ -59,16 +85,6 @@ export class VpnAgentRpc {
             id: id,
             params: params
         })
-
-        // 请求超时保护：若 agent 长时间不响应（如网络阻塞），主动回调错误，避免卡死
-        const timeoutMs = 30000 // 30 秒超时
-        setTimeout(() => {
-            if (this.callbackMap.has(id)) {
-                const cb = this.callbackMap.get(id)
-                this.callbackMap.delete(id)
-                cb({ id, error: { code: -1, message: 'request timeout' } })
-            }
-        }, timeoutMs)
     }
 
     callAsync(method: JsonRpcRequestMethod, id: number, callback: (result: Record<string, any>) => void) {
@@ -105,6 +121,12 @@ export class VpnAgentRpc {
             const cb = this.callbackMap.get(id)
             // 删除回调，避免超时定时器误触发或重复响应
             this.callbackMap.delete(id)
+            // 响应到达后清除超时定时器，避免无谓的 pending 任务残留
+            const timer = this.timeoutMap.get(id)
+            if (timer) {
+                clearTimeout(timer)
+                this.timeoutMap.delete(id)
+            }
             cb(res)
         }
     }
